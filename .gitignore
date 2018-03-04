@@ -1,2 +1,14 @@
+# Development environment files
 .pioenvs
 .piolibdeps
+.clang_complete
+.gcc-flags.json
+.testserverdata
+.pyenv*
+
+# Specific file extensions
+*.vscode
+*.stl
+.vscode/c_cpp_properties.json
+.vscode/*.db
+.vscode/launch.json
