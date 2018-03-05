@@ -17,7 +17,7 @@
 // == GLOBALS ==================================================================
 RTC_DS3231 _rtc;
 uint8_t _lastSecond = 0;
-char _btnState = 0;
+uint8_t _btnState = 0;
 uint32_t _btnTimeout = 0;
 
 
@@ -28,20 +28,26 @@ uint32_t _btnTimeout = 0;
  *              'S', '+', '-' if the Set, Inc or Dec button was pressed
  *              or a repeat occurred due to a long press.
  */
-char readButton() {
-    const uint8_t BTN_PINS[3] = { PIN_BTN_SET, PIN_BTN_INC, PIN_BTN_DEC };
-    const char BTN_VALUES[3] = { 'S', '+', '-' };
-    const uint8_t FLAG_DEBOUNCE = 0x80;
-    const uint8_t FLAG_REPEATED = 0X40;
-    const uint8_t FLAG_DOWN     = 0x20;
-    const uint8_t BUTTON_MASK   = 0x0F;
+char readButton() {    
+    const struct { uint8_t pin; char value; bool repeat; } BTN_INFO[3] = {
+        {PIN_BTN_SET, 'S', false },
+        {PIN_BTN_INC, '+', true },
+        {PIN_BTN_DEC, '-', true }
+    };
+    const uint8_t COUNT = sizeof(BTN_INFO) / sizeof(BTN_INFO[0]);
+    const uint8_t FLAG_DEBOUNCE  = 0x80;
+    const uint8_t FLAG_REPEATED  = 0x40;
+    const uint8_t FLAG_DOWN      = 0x20;
+    const uint8_t BUTTON_MASK    = 0x0F;
 
     // No button currently pressed, check if a new press is being detected
     if (!(_btnState & FLAG_DOWN)) {
         // Detect a press or return now
-        for(uint8_t i = 0; !_btnState && i < sizeof(BTN_PINS); i++)
-            if (digitalRead(BTN_PINS[i]) == LOW)
+        for(uint8_t i = 0; i < COUNT; i++)
+            if (digitalRead(BTN_INFO[i].pin) == LOW) {
                 _btnState = i | FLAG_DOWN;
+                break;
+            }
         if (!(_btnState & FLAG_DOWN))
             return 0;
 
@@ -51,6 +57,7 @@ char readButton() {
         _btnTimeout = millis() + DEBOUNCE_MS;
         _btnState |= FLAG_DEBOUNCE;
     }
+    uint8_t idx = _btnState & BUTTON_MASK;
 
     // If debouncing, wait for the debounce timeout
     if (_btnState & FLAG_DEBOUNCE) {
@@ -59,28 +66,32 @@ char readButton() {
             return 0;
         
         // Debounce complete !
-        // Set first repeat timeout & remove debounce flag
-        Serial.println(F("BUTTON: Debounce complete"));
-        _btnTimeout += (uint32_t)(REPEAT_FIRST_MS - DEBOUNCE_MS);
         _btnState &= ~FLAG_DEBOUNCE;
+        if (BTN_INFO[idx].repeat) {
+            // Repeating: Set first repeat timeout & remove debounce flag
+            Serial.println(F("BUTTON: Debounce complete"));
+            _btnTimeout += (uint32_t)(REPEAT_FIRST_MS - DEBOUNCE_MS);
+        }
+        else {
+            // Not repeating, send press result now
+            return BTN_INFO[idx].value;
+        }
     }
 
-    // If released, reset state and return released button if not yet repeated
-    if (digitalRead(BTN_PINS[_btnState & BUTTON_MASK]) == HIGH) {
+    // If released, reset state and return released button if repeating and not yet repeated
+    if (digitalRead(BTN_INFO[idx].pin) == HIGH) {
         Serial.println(F("BUTTON: Released"));
-        char result = 0;
-        if (!(_btnState & FLAG_REPEATED))
-            result = BTN_VALUES[_btnState & BUTTON_MASK];
+        bool returnValue = BTN_INFO[idx].repeat && !(_btnState & FLAG_REPEATED);
         _btnState = 0;
-        return result;
+        return returnValue ? BTN_INFO[idx].value : 0;
     }
 
     // Handle repeats
-    if ((long)(millis() -_btnTimeout) >= 0) {
+    if (BTN_INFO[idx].repeat && (long)(millis() -_btnTimeout) >= 0) {
         Serial.println(F("BUTTON: Repeat detected"));
         _btnState |= FLAG_REPEATED;
         _btnTimeout += (uint32_t)REPEAT_NEXT_MS;
-        return BTN_VALUES[_btnState & BUTTON_MASK];
+        return BTN_INFO[idx].value;
     }
 
     // Fallback
@@ -100,7 +111,7 @@ void updateDisplay() {
         uint8_t pwmM = map(now.minute()*60l+now.second(), 0, 3599, 0, 255);
         uint8_t pwmS = map(now.second(), 0, 59, 0, 255);
 
-
+        /*
         Serial.print(F("Writing time: "));
         Serial.print(now.hour()); Serial.print(':');
         Serial.print(now.minute()); Serial.print(':');
@@ -110,6 +121,7 @@ void updateDisplay() {
         Serial.print(pwmM); Serial.print(',');
         Serial.print(pwmS);
         Serial.println(')');
+        */
 
         // Update the display
         analogWrite(PIN_PWM_HRS, pwmH);
