@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <EEPROM.h>
 #include "RTClib.h"
 
 // == PINS =====================================================================
@@ -13,15 +14,32 @@
 #define DEBOUNCE_MS      20   // button debounce time
 #define REPEAT_FIRST_MS 500   // button first repeat delay
 #define REPEAT_NEXT_MS  100   // button next repeat delays
+#define DEBUG 1
+// == TYPES ====================================================================
+struct calibration_t {
+    uint8_t min;
+    uint8_t max;
+};
+struct config_t {
+    calibration_t hours;
+    calibration_t minutes;
+    calibration_t seconds;
+};
+struct timeofday_t {
+    uint8_t h;
+    uint8_t m;
+    uint8_t s;
+};
 
 // == GLOBALS ==================================================================
 RTC_DS3231 _rtc;
-uint8_t _lastSecond = 0;
+config_t _config;
+timeofday_t _displayedTime;
 uint8_t _btnState = 0;
 uint32_t _btnTimeout = 0;
 
+// == HAL ======================================================================
 
-// == CODE =====================================================================
 /** 
  * @brief  Detects button presses including repeats with long presses
  * @retval char '\0' if no button press was registered,
@@ -99,39 +117,200 @@ char readButton() {
 }
 
 /** 
- * @brief  Updates the time display
+ * @brief  Reads the current time
+ * @retval The current time of day.
+ */
+timeofday_t readTime() {
+    DateTime now = _rtc.now();
+
+    timeofday_t result;
+    result.h = now.hour();
+    result.m = now.minute();
+    result.s = now.second();
+    return result;
+}
+
+/** 
+ * @brief  Dump the content of the EEPROM for test purposes
+ * @note   
  * @retval None
  */
-void updateDisplay() {
-    DateTime now = _rtc.now();
-    if (now.second() != _lastSecond) {
-        _lastSecond = now.second();
+void eepromDump() {    
+    Serial.println("EEPROM DUMP:");
+    uint16_t len = EEPROM.length();
+    for(uint16_t addr = 0; addr < len; ++addr) {
+        uint8_t value = EEPROM.read(addr);
+        if ((addr & 0x7) == 0) {
+            Serial.print(addr <= 0xF ? "0x00" : (addr <= 0xFF ? "0x0" : "0x"));
+            Serial.print(addr, 16);
+        }
 
-        uint8_t pwmH = map(now.hour(), 0, 23, 0, 255);
-        uint8_t pwmM = map(now.minute()*60l+now.second(), 0, 3599, 0, 255);
-        uint8_t pwmS = map(now.second(), 0, 59, 0, 255);
+        Serial.print(value <= 0xF ? " 0" : " ");
+        Serial.print(value, 16);
+        if ((addr & 0x7) == 0x7)
+            Serial.println();
+    }
+}
 
-        /*
-        Serial.print(F("Writing time: "));
-        Serial.print(now.hour()); Serial.print(':');
-        Serial.print(now.minute()); Serial.print(':');
-        Serial.print(now.second());
-        Serial.print(F(" ("));
-        Serial.print(pwmH); Serial.print(',');
-        Serial.print(pwmM); Serial.print(',');
-        Serial.print(pwmS);
-        Serial.println(')');
-        */
+/** 
+ * @brief  Loads the configuration from the EEPROM
+ * @retval None
+ */
+void loadConfig() {
+    // Read version
+    uint8_t version = EEPROM.read(0);
 
-        // Update the display
-        analogWrite(PIN_PWM_HRS, pwmH);
-        analogWrite(PIN_PWM_MIN, pwmM);
-        analogWrite(PIN_PWM_SEC, pwmS);
-    }    
+    // If version matches, load, otherwise, initialize configuration to default
+    if (version == 1) {
+        EEPROM.get(1, _config);
+        #if DEBUG == 1
+            Serial.println(F("CONFIG LOADED:"));
+            Serial.print(F("  hours.min  =")); Serial.println(_config.hours.min);
+            Serial.print(F("  hours.max  =")); Serial.println(_config.hours.max);
+            Serial.print(F("  minutes.min=")); Serial.println(_config.minutes.min);
+            Serial.print(F("  minutes.max=")); Serial.println(_config.minutes.max);
+            Serial.print(F("  seconds.min=")); Serial.println(_config.seconds.min);
+            Serial.print(F("  seconds.max=")); Serial.println(_config.seconds.max);
+        #endif
+    }
+    else {
+        #if DEBUG == 1
+            Serial.println(F("CONFIG SET TO DEFAULT !"));
+        #endif
+        
+        _config.hours.min = 0x00;
+        _config.hours.max = 0xFF;
+        _config.minutes.min = 0x00;
+        _config.minutes.max = 0xFF;
+        _config.seconds.min = 0x00;
+        _config.seconds.max = 0xFF;
+    }
+}
+
+/** 
+ * @brief  Saves the configuration to the EEPROM
+ * @retval None
+ */
+void saveConfig() {
+    // Write version
+    EEPROM.update(0, 1);
+    // Write configuration
+    EEPROM.put(1, _config);
+}
+
+/** 
+ * @brief  Returns the best possible PWM value for the given display value
+ * @note   
+ * @param  value: The zero-based display value
+ * @param  range: The display value that must map to pwmMax
+ * @param  pwmMin: The PWM value to return when value is 0
+ * @param  pwmMax: The PWM value to return when value is range
+ * @retval The best matching PWM value for value
+ */
+uint8_t getPwm(uint16_t value, uint16_t range, uint8_t pwmMin, uint8_t pwmMax) {
+    // Constrain value to range
+    if (value > range)
+        value = range;
+
+    // Add 1/2 divisor so that trunction results ends up to the next int if
+    // division fractionalresult is >= .5
+    return pwmMin + ((value * (uint16_t)(pwmMax-pwmMin) + (range > 1)) / range);
+}
+
+/** 
+ * @brief  Writes uncalibrated RAW value to the hour voltmeter display.
+ * @note   
+ * @param  pwm: The raw uncalibrated PWM value (0-255) to write.
+ * @retval None
+ */
+void writeHoursRaw(uint8_t pwm) {
+    analogWrite(PIN_PWM_HRS, pwm);
+    _displayedTime.h = 0xFF;
+
+    #if DEBUG == 1
+    Serial.print("Write hours: ");
+    Serial.println(pwm);
+    #endif
+}
+
+/** 
+ * @brief  Writes uncalibrated RAW value to the minute voltmeter display.
+ * @note   
+ * @param  pwm: The raw uncalibrated PWM value (0-255) to write.
+ * @retval None
+ */
+void writeMinutesRaw(uint8_t pwm) {
+    analogWrite(PIN_PWM_MIN, pwm);
+    _displayedTime.m = 0xFF;
+    #if DEBUG == 1
+    Serial.print("Write minutes: ");
+    Serial.println(pwm);
+    #endif
+}
+
+/** 
+ * @brief  Writes uncalibrated RAW value to the seconds voltmeter display.
+ * @note   
+ * @param  pwm: The raw uncalibrated PWM value (0-255) to write.
+ * @retval None
+ */
+void writeSecondsRaw(uint8_t pwm) {
+    analogWrite(PIN_PWM_SEC, pwm);
+    _displayedTime.s = 0xFF;
+    #if DEBUG == 1
+    Serial.print("Write seconds: ");
+    Serial.println(pwm);
+    #endif
+}
+
+/** 
+ * @brief  Writes time to the voltmeter display using calibration values.
+ * @note   
+ * @param  time: The time to write
+ * @retval None
+ */
+void writeTime(timeofday_t time) {
+    #if DEBUG == 1
+    Serial.print("Write time: ");
+    Serial.print(time.h); Serial.print(':');
+    Serial.print(time.m); Serial.print(':');
+    Serial.println(time.s); 
+    #endif
+
+    writeHoursRaw(
+        getPwm(time.h, 24, _config.hours.min, _config.hours.max));
+    writeMinutesRaw(
+        getPwm(time.m, 60, _config.minutes.min, _config.minutes.max));
+    writeSecondsRaw(
+        getPwm(time.s, 60, _config.seconds.min, _config.seconds.max));
+
+    _displayedTime = time;
+}
+
+// == STATE MACHINE ============================================================
+
+#define STATE_NONE 0
+
+/** 
+ * @brief  Handles the "Show Time" state
+ * @param  init: true if a state transition just happened; otherwise, false;
+ * @retval The new state or STATE_NONE to stay in the same state.
+ */
+uint8_t stateShowTime(bool init) {
+    timeofday_t time = readTime();
+    
+    // Only push time if it is not the correctly displayed one
+    if (_displayedTime.s != time.s ||
+        _displayedTime.m != time.m ||
+        _displayedTime.h != time.h)
+        writeTime(time);        
+    
 }
 
 
 
+
+// == SETUP AND MAIN LOOP ======================================================
 /** 
  * @brief Initializes the program and the peripherials
  * @retval None
@@ -154,21 +333,14 @@ void setup() {
     pinMode(PIN_BTN_DEC, INPUT_PULLUP);
     pinMode(PIN_BTN_INC, INPUT_PULLUP);
 
-    
+    // Initialize EEPROM access & load configuration
+    EEPROM.begin();  
+    loadConfig();
 }
-
-uint16_t value = 0;
 
 /** 
  * @brief  Main program loop
  * @retval None
  */
-void loop() {
-    updateDisplay();
-
-    char button = readButton();
-    if (button) {
-        Serial.print("Button press or repeat: ");
-        Serial.println(button);
-    }
+void loop() {  
 }
