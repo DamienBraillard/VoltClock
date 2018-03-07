@@ -92,6 +92,17 @@ uint8_t getCalibratedPwm(uint8_t x, uint8_t max, CalibrationData calibration) {
     return mapRound(x, 0, range, ptMin, ptMax);
 }
 
+/** 
+ * @brief  Returns an osciliating PWM value based on time.
+ * @retval A PWM value osciliating slowly at each call, based on time.
+ */
+uint8_t getWaitPwmValue() {
+  uint8_t value = ((millis() >> 4) & 0xFF);
+    if (value & 0x80)
+        return 191 - (value & 0x7F);
+    return 64 + (value & 0x7F);
+}
+
 // == HAL ======================================================================
 
 /** 
@@ -380,7 +391,7 @@ void writeSeconds(uint8_t value, bool raw) {
 uint8_t stateShowTime(bool init) {
     #if DEBUG == 1
     if (init)
-        Serial.println("Entering state 'ShowTime'");    
+        Serial.println(F("Entering state 'ShowTime'"));
     #endif
 
     TimeData t = readTime();
@@ -392,7 +403,7 @@ uint8_t stateShowTime(bool init) {
         writeSeconds(t.s, false);
         _curTime = t;
         #if DEBUG == 1
-        Serial.print("Time: ");
+        Serial.print(F("Time: "));
         Serial.print(t.h);
         Serial.print(':');
         Serial.print(t.m);
@@ -416,26 +427,40 @@ uint8_t stateShowTime(bool init) {
 uint8_t stateSetHours(bool init) {
     if (init) {
         #if DEBUG == 1
-        Serial.println("Entering state 'SetHours'");
+        Serial.println(F("Entering state 'SetHours'"));
+        Serial.print(F("Actual hours: "));
+        Serial.println(_curTime.h);
         #endif
-        writeHours(_curTime.h, false);
+
         writeMinutes(_curTime.m, false);
         writeSeconds(0, true);
+        writeHours(0, true);
+        delay(300);
+        writeHours(255, true);
+        delay(300);
+        writeHours(_curTime.h, false);
     }
 
     switch(readButton()) {
         case 1:
-            _curTime.h = _curTime.h > 0 ? _curTime.m - 1 : 23;
-            writeHours(_curTime.h, false);
+            _curTime.h = _curTime.h > 0 ? _curTime.h - 1 : 23;
             break;
         case 2:
-            _curTime.h = _curTime.h < 23 ? _curTime.m + 1 : 0;
-            writeHours(_curTime.h, false);
+            _curTime.h = _curTime.h < 23 ? _curTime.h + 1 : 0;
             break;
         case 3:
             return STATE_SET_MINUTES;
-    }
+        default:
+            writeSeconds(getWaitPwmValue(), true);
+            return STATE_NONE;   
+        }
 
+    #if DEBUG == 1
+    Serial.print(F("Hours set to: "));
+    Serial.println(_curTime.h);
+    #endif
+
+    writeHours(_curTime.h, false);
     return STATE_NONE;
 }
 
@@ -447,29 +472,44 @@ uint8_t stateSetHours(bool init) {
 uint8_t stateSetMinutes(bool init) {
       if (init) {
         #if DEBUG == 1
-        Serial.println("Entering state 'SetMinutes'");
+        Serial.println(F("Entering state 'SetMinutes'"));
+        Serial.print(F("Actual minutes: "));
+        Serial.println(_curTime.m);
         #endif
         writeHours(_curTime.h, false);
-        writeMinutes(_curTime.m, false);
         writeSeconds(0, true);
+        writeMinutes(0, true);
+        delay(300);
+        writeMinutes(255, true);
+        delay(300);
+        writeMinutes(_curTime.m, false);
     }
 
     switch(readButton()) {
         case 1:
             _curTime.m = _curTime.m > 0 ? _curTime.m - 1 : 59;
-            writeMinutes(_curTime.m, false);
             break;
         case 2:
             _curTime.m = _curTime.m < 59 ? _curTime.m + 1 : 0;
-            writeMinutes(_curTime.m, false);
             break;
         case 3:
+            #if DEBUG == 1
+            Serial.println(F("Time set done"));
+            #endif
             writeTime(_curTime.h, _curTime.m);
             return STATE_SHOW_TIME;
+        default:
+            writeSeconds(getWaitPwmValue(), true);
+            return STATE_NONE;
     }
 
-    return STATE_NONE;
+    #if DEBUG == 1
+    Serial.print(F("Minutes set to: "));
+    Serial.println(_curTime.m);
+    #endif
 
+    writeMinutes(_curTime.m, false);
+    return STATE_NONE;
 }
 
 /** 
@@ -504,19 +544,15 @@ uint8_t stateCalibrateMechanical(bool init) {
 uint8_t stateCalibrateHours(bool init) {
     if (init) {
         #if DEBUG == 1
-        Serial.println("Entering state 'CalibrateHours'");
+        Serial.println(F("Entering state 'CalibrateHours'"));
         #endif
         _setCalibrationIdx = 0;
     }
 
     // Wave other displays up and down
-    uint8_t wavePwm = ((millis() >> 4) & 0xFF);
-    if (wavePwm & 0x80)
-        wavePwm = 191 - (wavePwm & 0x7F);
-    else
-        wavePwm = 64 + (wavePwm & 0x7F);
-    writeMinutes(wavePwm, true);
-    writeSeconds(wavePwm, true);
+    uint8_t waitPwm = getWaitPwmValue();
+    writeMinutes(waitPwm, true);
+    writeSeconds(waitPwm, true);
 
     switch(readButton()) {
         case 1:
@@ -554,19 +590,15 @@ uint8_t stateCalibrateHours(bool init) {
 uint8_t stateCalibrateMinutes(bool init) {
     if (init) {
         #if DEBUG == 1
-        Serial.println("Entering state 'CalibrateMinutes'");
+        Serial.println(F("Entering state 'CalibrateMinutes'"));
         #endif
         _setCalibrationIdx = 0;
     }
 
     // Wave other displays up and down
-    uint8_t wavePwm = ((millis() >> 4) & 0xFF);
-    if (wavePwm & 0x80)
-        wavePwm = 191 - (wavePwm & 0x7F);
-    else
-        wavePwm = 64 + (wavePwm & 0x7F);
-    writeHours(wavePwm, true);
-    writeSeconds(wavePwm, true);
+    uint8_t waitPwm = getWaitPwmValue();
+    writeHours(waitPwm, true);
+    writeSeconds(waitPwm, true);
 
     switch(readButton()) {
         case 1:
@@ -605,19 +637,15 @@ uint8_t stateCalibrateMinutes(bool init) {
 uint8_t stateCalibrateSeconds(bool init) {
     if (init) {
         #if DEBUG == 1
-        Serial.println("Entering state 'CalibrateSeconds'");
+        Serial.println(F("Entering state 'CalibrateSeconds'"));
         #endif
         _setCalibrationIdx = 0;
     }
 
     // Wave other displays up and down
-    uint8_t wavePwm = ((millis() >> 4) & 0xFF);
-    if (wavePwm & 0x80)
-        wavePwm = 191 - (wavePwm & 0x7F);
-    else
-        wavePwm = 64 + (wavePwm & 0x7F);
-    writeHours(wavePwm, true);
-    writeMinutes(wavePwm, true);
+    uint8_t waitPwm = getWaitPwmValue();
+    writeHours(waitPwm, true);
+    writeMinutes(waitPwm, true);
 
     switch(readButton()) {
         case 1:
@@ -724,7 +752,7 @@ void loop() {
             break;
     #if DEBUG == 1
         default:
-            Serial.print("Invalid state value: ");
+            Serial.print(F("Invalid state value: "));
             Serial.println(_curState);
     #endif            
     }
