@@ -9,11 +9,12 @@
 #define PIN_BTN_DEC  3      // input pin for the 'DECREMENT' button
 #define PIN_BTN_INC  4      // input pin for the 'INCREMENT' button
 
-// == CONSTANTS ================================================================
+// == CONFIGURATION=============================================================
 #define DEBOUNCE_MS      20   // button debounce time
 #define REPEAT_FIRST_MS 500   // button first repeat delay
 #define REPEAT_NEXT_MS  100   // button next repeat delays
 #define DEBUG 1
+
 // == TYPES ====================================================================
 struct CalibrationData {
     uint8_t min;
@@ -29,7 +30,6 @@ struct TimeData {
     uint8_t m;
     uint8_t s;
 };
-
 struct ButtonData {
     uint32_t timeout:32;
     uint8_t buttons :2;
@@ -51,12 +51,12 @@ uint8_t _curState;
 
 /** 
  * @brief  Detects button presses including repeats with long presses
- * @retval char '\0' if no button press was registered,
- *              '+' if the increment button is pressed or repeated,
- *              '-' if the decrement button is pressed or repeated,
- *              'S' if both buttons are pressed
+ * @retval uint8_t 0 if no button press was registered,
+ *                 1 if the button 1 was pressed or repeated,
+ *                 2 if the button 2 was pressed or repeated,
+ *                 3 if both buttons were pressed
  */
-char readButton() {        
+uint8_t readButton() {        
     // Extract previous state and calculate actual state
     uint8_t curButtons = 0;
     if (digitalRead(PIN_BTN_DEC) == LOW)
@@ -129,16 +129,7 @@ char readButton() {
     // Now emit
     if (emitButtons)
         _btnData.emited = true;
-    switch(emitButtons) {
-        case 1:
-            return '-';
-        case 2:
-            return '+';
-        case 3:
-            return 'S';
-        default:
-            return '\0';
-    }
+    return emitButtons;
 }
 
 /** 
@@ -355,7 +346,7 @@ uint8_t stateShowTime(bool init) {
     }
     
     // Check press on the set button
-    if (readButton() == 'S')
+    if (readButton() == 3)
         return STATE_SET_HOURS;
 
     return STATE_NONE;
@@ -377,22 +368,22 @@ uint8_t stateSetHours(bool init) {
     }
 
     switch(readButton()) {
-        case 'S':
-            return STATE_SET_MINUTES;
-        case '+':
-            if (_curTime.h < 24)
-                _curTime.h++;
-            else
-                _curTime.h = 0;
-            writeHours(_curTime.h, false);
-            break;
-        case '-':
+        case 1:
             if (_curTime.h > 0)
                 _curTime.h--;
             else
                 _curTime.h = 23;
             writeHours(_curTime.h, false);
             break;
+        case 2:
+            if (_curTime.h < 24)
+                _curTime.h++;
+            else
+                _curTime.h = 0;
+            writeHours(_curTime.h, false);
+            break;
+        case 3:
+            return STATE_SET_MINUTES;
     }
 
     return STATE_NONE;
@@ -414,23 +405,23 @@ uint8_t stateSetMinutes(bool init) {
     }
 
     switch(readButton()) {
-        case 'S':
-            writeTime(_curTime.h, _curTime.m);
-            return STATE_SHOW_TIME;
-        case '+':
-            if (_curTime.m < 60)
-                _curTime.m++;
-            else
-                _curTime.m = 0;
-            writeMinutes(_curTime.m, false);
-            break;
-        case '-':
+        case 1:
             if (_curTime.m > 0)
                 _curTime.m--;
             else
                 _curTime.m = 59;
             writeMinutes(_curTime.m, false);
             break;
+        case 2:
+            if (_curTime.m < 60)
+                _curTime.m++;
+            else
+                _curTime.m = 0;
+            writeMinutes(_curTime.m, false);
+            break;
+        case 3:
+            writeTime(_curTime.h, _curTime.m);
+            return STATE_SHOW_TIME;
     }
 
     return STATE_NONE;
@@ -453,8 +444,8 @@ uint8_t stateCalibrateStart(bool init) {
         writeSeconds(128, true);
     }
 
-    if (readButton() == 'S')
-            return STATE_CALIBRATE_HOURS_LOW;
+    if (readButton() == 3)
+        return STATE_CALIBRATE_HOURS_LOW;
     return STATE_NONE;
 }
 /** 
@@ -473,16 +464,16 @@ uint8_t stateCalibrateHoursLow(bool init) {
     }
 
     switch(readButton()) {
-        case 'S':
-            return STATE_CALIBRATE_HOURS_HIGH;
-        case '+':
-            if (_config.hours.min < 255)
-                _config.hours.min++;
-            break;
-        case '-':
+        case 1:
             if (_config.hours.min > 0)
                 _config.hours.min--;
             break;
+        case 2:
+            if (_config.hours.min < 255)
+                _config.hours.min++;
+            break;
+        case 3:
+            return STATE_CALIBRATE_HOURS_HIGH;
     }
 
     writeHours(_config.hours.min, true);
@@ -505,16 +496,16 @@ uint8_t stateCalibrateHoursHigh(bool init) {
     }
 
     switch(readButton()) {
-        case 'S':
-            return STATE_CALIBRATE_MINUTES_LOW;
-        case '+':
-            if (_config.hours.max < 255)
-                _config.hours.max++;
-            break;
-        case '-':
+        case 1:
             if (_config.hours.max > 0)
                 _config.hours.max--;
             break;
+        case 2:
+            if (_config.hours.max < 255)
+                _config.hours.max++;
+            break;
+        case 3:
+            return STATE_CALIBRATE_MINUTES_LOW;
     }
 
     writeHours(_config.hours.max, true);
@@ -537,16 +528,16 @@ uint8_t stateCalibrateMinutesLow(bool init) {
     }
 
     switch(readButton()) {
-        case 'S':
-            return STATE_CALIBRATE_MINUTES_HIGH;
-        case '+':
-            if (_config.minutes.min < 255)
-                _config.minutes.min++;
-            break;
-        case '-':
+        case 1:
             if (_config.minutes.min > 0)
                 _config.minutes.min--;
             break;
+        case 2:
+            if (_config.minutes.min < 255)
+                _config.minutes.min++;
+            break;
+        case 3:
+            return STATE_CALIBRATE_MINUTES_HIGH;
     }
 
     writeMinutes(_config.minutes.min, true);
@@ -569,16 +560,16 @@ uint8_t stateCalibrateMinutesHigh(bool init) {
     }
 
     switch(readButton()) {
-        case 'S':
-            return STATE_CALIBRATE_SECONDS_LOW;
-        case '+':
-            if (_config.minutes.max < 255)
-                _config.minutes.max++;
-            break;
-        case '-':
+        case 1:
             if (_config.minutes.max > 0)
                 _config.minutes.max--;
             break;
+        case 2:
+            if (_config.minutes.max < 255)
+                _config.minutes.max++;
+            break;
+        case 3:
+            return STATE_CALIBRATE_SECONDS_LOW;
     }
 
     writeMinutes(_config.minutes.max, true);
@@ -601,16 +592,16 @@ uint8_t stateCalibrateSecondsLow(bool init) {
     }
 
     switch(readButton()) {
-        case 'S':
-            return STATE_CALIBRATE_SECONDS_HIGH;
-        case '+':
-            if (_config.seconds.min < 255)
-                _config.seconds.min++;
-            break;
-        case '-':
+        case 1:
             if (_config.seconds.min > 0)
                 _config.seconds.min--;
             break;
+        case 2:
+            if (_config.seconds.min < 255)
+                _config.seconds.min++;
+            break;
+        case 3:
+            return STATE_CALIBRATE_SECONDS_HIGH;
     }
 
     writeSeconds(_config.seconds.min, true);
@@ -633,17 +624,17 @@ uint8_t stateCalibrateSecondsHigh(bool init) {
     }
 
     switch(readButton()) {
-        case 'S':
-            saveConfig();
-            return STATE_SHOW_TIME;
-        case '+':
-            if (_config.seconds.max < 255)
-                _config.seconds.max++;
-            break;
-        case '-':
+        case 1:
             if (_config.seconds.max > 0)
                 _config.seconds.max--;
             break;
+        case 2:
+            if (_config.seconds.max < 255)
+                _config.seconds.max++;
+            break;
+        case 3:
+            saveConfig();
+            return STATE_SHOW_TIME;
     }
 
     writeSeconds(_config.seconds.max, true);
@@ -685,7 +676,7 @@ void setup() {
     // must enter calibration mode...
     uint32_t timeout = millis() + static_cast<uint32_t>(DEBOUNCE_MS * 5);
     while((long)(millis() - timeout) < 0) {
-        if (readButton() == 'S') {
+        if (readButton() == 3) {
             _curState = STATE_CALIBRATE_START;    
             break;
         }
