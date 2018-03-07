@@ -8,5 +8,5 @@ The clock uses an Arduino and a RTC module to keep up with the time.
 
 Display is done through three 5V analog voltmeters. One for the hours, one for the minutes, and one for the seconds.
 
-# Setup
-TBD
+# Work in progress
+Work is in progress on this project, come here soon to see it complete !
