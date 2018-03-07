@@ -13,12 +13,13 @@
 #define DEBOUNCE_MS      20   // button debounce time
 #define REPEAT_FIRST_MS 500   // button first repeat delay
 #define REPEAT_NEXT_MS  100   // button next repeat delays
+#define CALIBRATION_POINTS 7  // Number of calibration points
+#define CONFIG_VERSION 2      // Configuration structure version number
 #define DEBUG 1
 
 // == TYPES ====================================================================
 struct CalibrationData {
-    uint8_t min;
-    uint8_t max;
+    uint8_t pts[CALIBRATION_POINTS];
 };
 struct ConfigData {
     CalibrationData hours;
@@ -42,12 +43,56 @@ struct ButtonData {
 RTC_DS3231 _rtc;
 ConfigData _config;
 TimeData _curTime;
+uint8_t _lastShowSecond;
+uint8_t _setCalibrationIdx;
 ButtonData  _btnData;
 uint8_t _lastState;
 uint8_t _curState;
 
-// == HAL ======================================================================
+// == HELPER FUNCTIONS =========================================================
 
+/** 
+ * @brief  Maps a value from one range to the other while
+ *         Constraining the value to the output range.
+ * @param  x: The value to map 
+ * @param  inMin: The low inclusive input range
+ * @param  inMax: The high inclusive input range
+ * @param  outMin: The low inclusive output range
+ * @param  outMax: The high inclusive output range
+ * @retval 
+ */
+long mapRound(long x, long inMin, long inMax, long outMin, long outMax)
+{
+    long result =
+        ((x - inMin) * (outMax - outMin) + (inMax - inMin)/2) /
+        (inMax - inMin) +
+        outMin;
+    
+    return constrain(result, outMin, outMax);
+}
+
+/** 
+ * @brief  Calculates a multi-point calibrated PWM value
+ * @param  x: The zero-based value for which to obtain the calibrated PWM value
+ * @param  max: The maximum possible value of X
+ * @param  calibration: The calibration points
+ * @retval The calculated calibrated PWM value matching x
+ */
+uint8_t getCalibratedPwm(uint8_t x, uint8_t max, CalibrationData calibration) {
+    // Find calibration value divider and low point index
+    uint8_t range = max / (CALIBRATION_POINTS-1);
+    uint8_t idx = x / range;
+
+    // Find low and high point values & calculate x within the range
+    uint8_t ptMin = calibration.pts[idx];
+    uint8_t ptMax = calibration.pts[idx+1];
+    x = x % range;
+
+    // Do rounded linear interpolation
+    return mapRound(x, 0, range, ptMin, ptMax);
+}
+
+// == HAL ======================================================================
 
 /** 
  * @brief  Detects button presses including repeats with long presses
@@ -190,6 +235,37 @@ void eepromDump() {
 }
 
 /** 
+ * @brief  Dumps the configuration for debug purposes
+ * @note   
+ * @retval None
+ */
+void dumpConfig() {
+    #if DEBUG == 1
+    Serial.println(F("Configuration dump:"));
+    Serial.print(F("  hours calibration points  :"));
+    for(uint8_t i = 0; i < CALIBRATION_POINTS; i++) {
+        uint8_t p = _config.hours.pts[i];
+        Serial.print(p > 100 ? F(" ") : (p > 10 ? F("  ") : F("   ")));
+        Serial.print(p);
+    }
+    Serial.println();
+    Serial.print(F("  minutes calibration points :"));
+    for(uint8_t i = 0; i < CALIBRATION_POINTS; i++) {
+        uint8_t p = _config.minutes.pts[i];
+        Serial.print(p > 100 ? F(" ") : (p > 10 ? F("  ") : F("   ")));
+        Serial.print(p);
+    }
+    Serial.println();
+    Serial.print(F("  seconds calibration points :"));
+    for(uint8_t i = 0; i < CALIBRATION_POINTS; i++) {
+        uint8_t p = _config.seconds.pts[i];
+        Serial.print(p > 100 ? F(" ") : (p > 10 ? F("  ") : F("   ")));
+        Serial.print(p);
+    }
+    Serial.println();
+    #endif
+}
+/** 
  * @brief  Loads the configuration from the EEPROM
  * @retval None
  */
@@ -198,29 +274,34 @@ void loadConfig() {
     uint8_t version = EEPROM.read(0);
 
     // If version matches, load, otherwise, initialize configuration to default
-    if (version == 1) {
+    if (version == CONFIG_VERSION) {
+        // Load configuration from EEPROM
         EEPROM.get(1, _config);
+
         #if DEBUG == 1
-            Serial.println(F("CONFIG LOADED:"));
-            Serial.print(F("  hours.min  =")); Serial.println(_config.hours.min);
-            Serial.print(F("  hours.max  =")); Serial.println(_config.hours.max);
-            Serial.print(F("  minutes.min=")); Serial.println(_config.minutes.min);
-            Serial.print(F("  minutes.max=")); Serial.println(_config.minutes.max);
-            Serial.print(F("  seconds.min=")); Serial.println(_config.seconds.min);
-            Serial.print(F("  seconds.max=")); Serial.println(_config.seconds.max);
+            Serial.println(F("Configuration loaded !"));
+            dumpConfig();
         #endif
     }
     else {
+        // Set defaults        
+        for(uint8_t i = 0; i < CALIBRATION_POINTS; ++i) {
+            uint8_t pt = mapRound(i, 0, CALIBRATION_POINTS-1, 0, 255);
+            _config.hours.pts[i] = pt;
+            _config.minutes.pts[i] = pt;
+            _config.seconds.pts[i] = pt;
+        }
+        // Save
+        EEPROM.update(0, CONFIG_VERSION);
+        EEPROM.put(1, _config);
+
         #if DEBUG == 1
-            Serial.println(F("CONFIG SET TO DEFAULT !"));
+            Serial.print(F("Configuration version mismatch: expected "));
+            Serial.print(CONFIG_VERSION);
+            Serial.print(F(" but read "));
+            Serial.print(version);
+            Serial.println(F(". Defaults values set"));
         #endif
-        
-        _config.hours.min = 0x00;
-        _config.hours.max = 0xFF;
-        _config.minutes.min = 0x00;
-        _config.minutes.max = 0xFF;
-        _config.seconds.min = 0x00;
-        _config.seconds.max = 0xFF;
     }
 }
 
@@ -230,38 +311,14 @@ void loadConfig() {
  */
 void saveConfig() {
     // Write version
-    EEPROM.update(0, 1);
+    EEPROM.update(0, CONFIG_VERSION);
     // Write configuration
     EEPROM.put(1, _config);
 
     #if DEBUG == 1
-        Serial.println(F("CONFIG SAVED:"));
-        Serial.print(F("  hours.min  =")); Serial.println(_config.hours.min);
-        Serial.print(F("  hours.max  =")); Serial.println(_config.hours.max);
-        Serial.print(F("  minutes.min=")); Serial.println(_config.minutes.min);
-        Serial.print(F("  minutes.max=")); Serial.println(_config.minutes.max);
-        Serial.print(F("  seconds.min=")); Serial.println(_config.seconds.min);
-        Serial.print(F("  seconds.max=")); Serial.println(_config.seconds.max);
+        Serial.println(F("Copnfiguration saved !"));
+        dumpConfig();
     #endif    
-}
-
-/** 
- * @brief  Returns the best possible PWM value for the given display value
- * @note   
- * @param  value: The zero-based display value
- * @param  range: The display value that must map to pwmMax
- * @param  pwmMin: The PWM value to return when value is 0
- * @param  pwmMax: The PWM value to return when value is range
- * @retval The best matching PWM value for value
- */
-uint8_t getPwm(uint16_t value, uint16_t range, uint8_t pwmMin, uint8_t pwmMax) {
-    // Constrain value to range
-    if (value > range)
-        value = range;
-
-    // Add 1/2 divisor so that trunction results ends up to the next int if
-    // division fractionalresult is >= .5
-    return pwmMin + ((value * (uint16_t)(pwmMax-pwmMin) + (range > 1)) / range);
 }
 
 /** 
@@ -273,7 +330,7 @@ uint8_t getPwm(uint16_t value, uint16_t range, uint8_t pwmMin, uint8_t pwmMax) {
  */
 void writeHours(uint8_t value, bool raw) {
     if (!raw)
-        value = getPwm(value, 24, _config.hours.min, _config.hours.max);
+        value = getCalibratedPwm(value, 24, _config.hours);
     analogWrite(PIN_PWM_HRS, value);
 }
 
@@ -286,7 +343,7 @@ void writeHours(uint8_t value, bool raw) {
  */
 void writeMinutes(uint8_t value, bool raw) {
     if (!raw)
-        value = getPwm(value, 60, _config.minutes.min, _config.minutes.max);
+        value = getCalibratedPwm(value, 60, _config.minutes);
     analogWrite(PIN_PWM_MIN, value);
 }
 
@@ -299,7 +356,7 @@ void writeMinutes(uint8_t value, bool raw) {
  */
 void writeSeconds(uint8_t value, bool raw) {
     if (!raw)
-        value = getPwm(value, 60, _config.seconds.min, _config.seconds.max);
+        value = getCalibratedPwm(value, 60, _config.seconds);
     analogWrite(PIN_PWM_SEC, value);
 
 }
@@ -310,13 +367,10 @@ void writeSeconds(uint8_t value, bool raw) {
 #define STATE_SHOW_TIME 1
 #define STATE_SET_HOURS 2
 #define STATE_SET_MINUTES 3
-#define STATE_CALIBRATE_START 4
-#define STATE_CALIBRATE_HOURS_LOW 5
-#define STATE_CALIBRATE_HOURS_HIGH 6
-#define STATE_CALIBRATE_MINUTES_LOW 7
-#define STATE_CALIBRATE_MINUTES_HIGH 8
-#define STATE_CALIBRATE_SECONDS_LOW 9
-#define STATE_CALIBRATE_SECONDS_HIGH 10
+#define STATE_CALIBRATE_MECHANICAL 4
+#define STATE_CALIBRATE_HOURS 5
+#define STATE_CALIBRATE_MINUTES 6
+#define STATE_CALIBRATE_SECONDS 7
 
 /** 
  * @brief  Implements the state that shows the time
@@ -326,23 +380,25 @@ void writeSeconds(uint8_t value, bool raw) {
 uint8_t stateShowTime(bool init) {
     #if DEBUG == 1
     if (init)
-        Serial.println("Entering state 'ShowTime'");
+        Serial.println("Entering state 'ShowTime'");    
     #endif
 
-    TimeData time = readTime();
+    TimeData t = readTime();
     
     // Only push time if it is not the correctly displayed one
-    if (init || _curTime.h != time.h) {
-        writeHours(time.h, false);
-        _curTime.h = time.h;
-    }
-    if (init || _curTime.m != time.m) {
-        writeMinutes(time.m, false);
-        _curTime.m = time.m;
-    }
-    if (init || _curTime.s != time.s) {
-        writeSeconds(time.s, false);
-        _curTime.s = time.s;
+    if (init || _curTime.h != t.h || _curTime.m != t.m || _curTime.s != t.s) {
+        writeHours(t.h, false);
+        writeMinutes(t.m, false);
+        writeSeconds(t.s, false);
+        _curTime = t;
+        #if DEBUG == 1
+        Serial.print("Time: ");
+        Serial.print(t.h);
+        Serial.print(':');
+        Serial.print(t.m);
+        Serial.print(':');
+        Serial.println(t.s);
+        #endif
     }
     
     // Check press on the set button
@@ -360,7 +416,7 @@ uint8_t stateShowTime(bool init) {
 uint8_t stateSetHours(bool init) {
     if (init) {
         #if DEBUG == 1
-            Serial.println("Entering state 'SetHours'");
+        Serial.println("Entering state 'SetHours'");
         #endif
         writeHours(_curTime.h, false);
         writeMinutes(_curTime.m, false);
@@ -369,17 +425,11 @@ uint8_t stateSetHours(bool init) {
 
     switch(readButton()) {
         case 1:
-            if (_curTime.h > 0)
-                _curTime.h--;
-            else
-                _curTime.h = 23;
+            _curTime.h = _curTime.h > 0 ? _curTime.m - 1 : 23;
             writeHours(_curTime.h, false);
             break;
         case 2:
-            if (_curTime.h < 24)
-                _curTime.h++;
-            else
-                _curTime.h = 0;
+            _curTime.h = _curTime.h < 23 ? _curTime.m + 1 : 0;
             writeHours(_curTime.h, false);
             break;
         case 3:
@@ -397,7 +447,7 @@ uint8_t stateSetHours(bool init) {
 uint8_t stateSetMinutes(bool init) {
       if (init) {
         #if DEBUG == 1
-            Serial.println("Entering state 'SetMinutes'");
+        Serial.println("Entering state 'SetMinutes'");
         #endif
         writeHours(_curTime.h, false);
         writeMinutes(_curTime.m, false);
@@ -406,17 +456,11 @@ uint8_t stateSetMinutes(bool init) {
 
     switch(readButton()) {
         case 1:
-            if (_curTime.m > 0)
-                _curTime.m--;
-            else
-                _curTime.m = 59;
+            _curTime.m = _curTime.m > 0 ? _curTime.m - 1 : 59;
             writeMinutes(_curTime.m, false);
             break;
         case 2:
-            if (_curTime.m < 60)
-                _curTime.m++;
-            else
-                _curTime.m = 0;
+            _curTime.m = _curTime.m < 59 ? _curTime.m + 1 : 0;
             writeMinutes(_curTime.m, false);
             break;
         case 3:
@@ -429,218 +473,184 @@ uint8_t stateSetMinutes(bool init) {
 }
 
 /** 
- * @brief  Implements the state that allows to physically calibrate the 
- *         needles ate the center.
+ * @brief  Implements the state that allows mechanical calibration of the
+ *         voltmeter displays.
  * @param  init: true if a state transition just happened; otherwise, false;
  * @retval The new state or STATE_NONE to stay in the current state.
  */
-uint8_t stateCalibrateStart(bool init) {
+uint8_t stateCalibrateMechanical(bool init) {
     if (init) {
         #if DEBUG == 1
-            Serial.println("Entering state 'CalibrateStart'");
+        Serial.println("Entering state 'CalibrateMechanical'");
         #endif
-        writeHours(128, true);
-        writeMinutes(128, true);
-        writeSeconds(128, true);
+        _setCalibrationIdx = 0;
     }
+    // Select minimum and maximum at around 2 second interval
+    uint8_t pwmValue = ((millis() >> 12) & 0x01) * 0xFF;
+    writeHours(pwmValue, true);
+    writeMinutes(pwmValue, true);
+    writeSeconds(pwmValue, true);
 
-    if (readButton() == 3)
-        return STATE_CALIBRATE_HOURS_LOW;
-    return STATE_NONE;
-}
-/** 
- * @brief  Implements the state that calibrates the hours low PWM value.
- * @param  init: true if a state transition just happened; otherwise, false;
- * @retval The new state or STATE_NONE to stay in the current state.
- */
-uint8_t stateCalibrateHoursLow(bool init) {
-    if (init) {
-        #if DEBUG == 1
-            Serial.println("Entering state 'CalibrateHoursLow'");
-        #endif
-        writeHours(128, true);
-        writeMinutes(128, true);
-        writeSeconds(128, true);
-    }
-
-    switch(readButton()) {
-        case 1:
-            if (_config.hours.min > 0)
-                _config.hours.min--;
-            break;
-        case 2:
-            if (_config.hours.min < 255)
-                _config.hours.min++;
-            break;
-        case 3:
-            return STATE_CALIBRATE_HOURS_HIGH;
-    }
-
-    writeHours(_config.hours.min, true);
+    if (readButton() != 0)
+        return STATE_CALIBRATE_HOURS;
     return STATE_NONE;
 }
 
 /** 
- * @brief  Implements the state that calibrates the hours high PWM value.
+ * @brief  Implements the state that calibrate the hours voltmeter display.
  * @param  init: true if a state transition just happened; otherwise, false;
  * @retval The new state or STATE_NONE to stay in the current state.
  */
-uint8_t stateCalibrateHoursHigh(bool init) {
+uint8_t stateCalibrateHours(bool init) {
     if (init) {
         #if DEBUG == 1
-            Serial.println("Entering state 'CalibrateHoursHigh'");
+        Serial.println("Entering state 'CalibrateHours'");
         #endif
-        writeHours(128, true);
-        writeMinutes(128, true);
-        writeSeconds(128, true);
+        _setCalibrationIdx = 0;
     }
+
+    // Wave other displays up and down
+    uint8_t wavePwm = ((millis() >> 4) & 0xFF);
+    if (wavePwm & 0x80)
+        wavePwm = 191 - (wavePwm & 0x7F);
+    else
+        wavePwm = 64 + (wavePwm & 0x7F);
+    writeMinutes(wavePwm, true);
+    writeSeconds(wavePwm, true);
 
     switch(readButton()) {
         case 1:
-            if (_config.hours.max > 0)
-                _config.hours.max--;
+            _config.hours.pts[_setCalibrationIdx]--;
             break;
         case 2:
-            if (_config.hours.max < 255)
-                _config.hours.max++;
+            _config.hours.pts[_setCalibrationIdx]++;
             break;
         case 3:
-            return STATE_CALIBRATE_MINUTES_LOW;
+            if (++_setCalibrationIdx >= CALIBRATION_POINTS)
+                return STATE_CALIBRATE_MINUTES;
+            break;
+        default:
+            if (!init)
+                return STATE_NONE;
+            break;
     }
 
-    writeHours(_config.hours.max, true);
+    #if DEBUG == 1
+    Serial.print(F("Calibration hour point "));
+    Serial.print(_setCalibrationIdx);
+    Serial.print(F(" value = "));
+    Serial.println(_config.hours.pts[_setCalibrationIdx]);
+    #endif
+
+    writeHours(_config.hours.pts[_setCalibrationIdx], true);
     return STATE_NONE;
 }
 
 /** 
- * @brief  Implements the state that calibrates the minutes low PWM value.
+ * @brief  Implements the state that calibrate the minutes voltmeter display.
  * @param  init: true if a state transition just happened; otherwise, false;
  * @retval The new state or STATE_NONE to stay in the current state.
  */
-uint8_t stateCalibrateMinutesLow(bool init) {
+uint8_t stateCalibrateMinutes(bool init) {
     if (init) {
         #if DEBUG == 1
-            Serial.println("Entering state 'CalibrateMinutesLow'");
+        Serial.println("Entering state 'CalibrateMinutes'");
         #endif
-        writeHours(128, true);
-        writeMinutes(128, true);
-        writeSeconds(128, true);
+        _setCalibrationIdx = 0;
     }
+
+    // Wave other displays up and down
+    uint8_t wavePwm = ((millis() >> 4) & 0xFF);
+    if (wavePwm & 0x80)
+        wavePwm = 191 - (wavePwm & 0x7F);
+    else
+        wavePwm = 64 + (wavePwm & 0x7F);
+    writeHours(wavePwm, true);
+    writeSeconds(wavePwm, true);
 
     switch(readButton()) {
         case 1:
-            if (_config.minutes.min > 0)
-                _config.minutes.min--;
+            _config.minutes.pts[_setCalibrationIdx]--;
             break;
         case 2:
-            if (_config.minutes.min < 255)
-                _config.minutes.min++;
+            _config.minutes.pts[_setCalibrationIdx]++;
             break;
         case 3:
-            return STATE_CALIBRATE_MINUTES_HIGH;
+            if (++_setCalibrationIdx >= CALIBRATION_POINTS)
+                return STATE_CALIBRATE_SECONDS;
+            break;
+        default:
+            if (!init)
+                return STATE_NONE;
+            break;
     }
 
-    writeMinutes(_config.minutes.min, true);
+    #if DEBUG == 1
+    Serial.print(F("Calibration minute point "));
+    Serial.print(_setCalibrationIdx);
+    Serial.print(F(" value = "));
+    Serial.println(_config.minutes.pts[_setCalibrationIdx]);
+    #endif
+
+    writeMinutes(_config.minutes.pts[_setCalibrationIdx], true);
     return STATE_NONE;
 }
+
 
 /** 
- * @brief  Implements the state that calibrates the minutes high PWM value.
+ * @brief  Implements the state that calibrate the seconds voltmeter display.
  * @param  init: true if a state transition just happened; otherwise, false;
  * @retval The new state or STATE_NONE to stay in the current state.
  */
-uint8_t stateCalibrateMinutesHigh(bool init) {
+uint8_t stateCalibrateSeconds(bool init) {
     if (init) {
         #if DEBUG == 1
-            Serial.println("Entering state 'CalibrateMinutesHigh'");
+        Serial.println("Entering state 'CalibrateSeconds'");
         #endif
-        writeHours(128, true);
-        writeMinutes(128, true);
-        writeSeconds(128, true);
+        _setCalibrationIdx = 0;
     }
+
+    // Wave other displays up and down
+    uint8_t wavePwm = ((millis() >> 4) & 0xFF);
+    if (wavePwm & 0x80)
+        wavePwm = 191 - (wavePwm & 0x7F);
+    else
+        wavePwm = 64 + (wavePwm & 0x7F);
+    writeHours(wavePwm, true);
+    writeMinutes(wavePwm, true);
 
     switch(readButton()) {
         case 1:
-            if (_config.minutes.max > 0)
-                _config.minutes.max--;
+            _config.seconds.pts[_setCalibrationIdx]--;
             break;
         case 2:
-            if (_config.minutes.max < 255)
-                _config.minutes.max++;
+            _config.seconds.pts[_setCalibrationIdx]++;
             break;
         case 3:
-            return STATE_CALIBRATE_SECONDS_LOW;
+            if (++_setCalibrationIdx >= CALIBRATION_POINTS) {
+                #if DEBUG == 1
+                Serial.println(F("Calibration done."));
+                #endif
+                saveConfig();
+                return STATE_SHOW_TIME;
+            }
+            break;
+        default:
+            if (!init)
+                return STATE_NONE;
+            break;
     }
 
-    writeMinutes(_config.minutes.max, true);
+    #if DEBUG == 1
+    Serial.print(F("Calibration second point "));
+    Serial.print(_setCalibrationIdx);
+    Serial.print(F(" value = "));
+    Serial.println(_config.seconds.pts[_setCalibrationIdx]);
+    #endif
+
+    writeSeconds(_config.seconds.pts[_setCalibrationIdx], true);
     return STATE_NONE;
 }
-
-/** 
- * @brief  Implements the state that calibrates the seconds low PWM value.
- * @param  init: true if a state transition just happened; otherwise, false;
- * @retval The new state or STATE_NONE to stay in the current state.
- */
-uint8_t stateCalibrateSecondsLow(bool init) {
-    if (init) {
-        #if DEBUG == 1
-            Serial.println("Entering state 'CalibrateSecondsLow'");
-        #endif
-        writeHours(128, true);
-        writeMinutes(128, true);
-        writeSeconds(128, true);
-    }
-
-    switch(readButton()) {
-        case 1:
-            if (_config.seconds.min > 0)
-                _config.seconds.min--;
-            break;
-        case 2:
-            if (_config.seconds.min < 255)
-                _config.seconds.min++;
-            break;
-        case 3:
-            return STATE_CALIBRATE_SECONDS_HIGH;
-    }
-
-    writeSeconds(_config.seconds.min, true);
-    return STATE_NONE;
-}
-
-/** 
- * @brief  Implements the state that calibrates the seconds high PWM value.
- * @param  init: true if a state transition just happened; otherwise, false;
- * @retval The new state or STATE_NONE to stay in the current state.
- */
-uint8_t stateCalibrateSecondsHigh(bool init) {
-    if (init) {
-        #if DEBUG == 1
-            Serial.println("Entering state 'CalibrateSecondsHigh'");
-        #endif
-        writeHours(128, true);
-        writeMinutes(128, true);
-        writeSeconds(128, true);
-    }
-
-    switch(readButton()) {
-        case 1:
-            if (_config.seconds.max > 0)
-                _config.seconds.max--;
-            break;
-        case 2:
-            if (_config.seconds.max < 255)
-                _config.seconds.max++;
-            break;
-        case 3:
-            saveConfig();
-            return STATE_SHOW_TIME;
-    }
-
-    writeSeconds(_config.seconds.max, true);
-    return STATE_NONE;
-}
-
 
 // == SETUP AND MAIN LOOP ======================================================
 /** 
@@ -677,7 +687,7 @@ void setup() {
     uint32_t timeout = millis() + static_cast<uint32_t>(DEBOUNCE_MS * 5);
     while((long)(millis() - timeout) < 0) {
         if (readButton() == 3) {
-            _curState = STATE_CALIBRATE_START;    
+            _curState = STATE_CALIBRATE_HOURS;    
             break;
         }
     }
@@ -700,26 +710,17 @@ void loop() {
         case STATE_SET_MINUTES:
             _curState = stateSetMinutes(init);
             break;
-        case STATE_CALIBRATE_START:
-            _curState = stateCalibrateStart(init);
+        case STATE_CALIBRATE_MECHANICAL:
+            _curState = stateCalibrateMechanical(init);
             break;
-        case STATE_CALIBRATE_HOURS_LOW:
-            _curState = stateCalibrateHoursLow(init);
+        case STATE_CALIBRATE_HOURS:
+            _curState = stateCalibrateHours(init);
             break;
-        case STATE_CALIBRATE_HOURS_HIGH:
-            _curState = stateCalibrateHoursHigh(init);
+        case STATE_CALIBRATE_MINUTES:
+            _curState = stateCalibrateMinutes(init);
             break;
-        case STATE_CALIBRATE_MINUTES_LOW:
-            _curState = stateCalibrateMinutesLow(init);
-            break;
-        case STATE_CALIBRATE_MINUTES_HIGH:
-            _curState = stateCalibrateMinutesHigh(init);
-            break;
-        case STATE_CALIBRATE_SECONDS_LOW:
-            _curState = stateCalibrateSecondsLow(init);
-            break;
-        case STATE_CALIBRATE_SECONDS_HIGH:
-            _curState = stateCalibrateSecondsHigh(init);
+        case STATE_CALIBRATE_SECONDS:
+            _curState = stateCalibrateSeconds(init);
             break;
     #if DEBUG == 1
         default:
