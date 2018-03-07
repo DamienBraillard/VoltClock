@@ -6,7 +6,6 @@
 #define PIN_PWM_HRS  9      // output pin for the hours voltmeter
 #define PIN_PWM_MIN 10      // output pin for the minutes voltmeter
 #define PIN_PWM_SEC 11      // output pin for the seconds voltmeter
-#define PIN_BTN_SET  2      // input pin for the 'SET' button
 #define PIN_BTN_DEC  3      // input pin for the 'DECREMENT' button
 #define PIN_BTN_INC  4      // input pin for the 'INCREMENT' button
 
@@ -16,116 +15,140 @@
 #define REPEAT_NEXT_MS  100   // button next repeat delays
 #define DEBUG 1
 // == TYPES ====================================================================
-struct calibration_t {
+struct CalibrationData {
     uint8_t min;
     uint8_t max;
 };
-struct config_t {
-    calibration_t hours;
-    calibration_t minutes;
-    calibration_t seconds;
+struct ConfigData {
+    CalibrationData hours;
+    CalibrationData minutes;
+    CalibrationData seconds;
 };
-struct timeofday_t {
+struct TimeData {
     uint8_t h;
     uint8_t m;
     uint8_t s;
 };
 
+struct ButtonData {
+    uint32_t timeout:32;
+    uint8_t buttons :2;
+    bool debouncing : 1;
+    bool emited : 1;
+    bool allowRepeat : 1;
+};
+
 // == GLOBALS ==================================================================
 RTC_DS3231 _rtc;
-config_t _config;
-timeofday_t _curTime;
-uint8_t _btnState = 0;
-uint32_t _btnTimeout = 0;
+ConfigData _config;
+TimeData _curTime;
+ButtonData  _btnData;
 uint8_t _lastState;
 uint8_t _curState;
 
 // == HAL ======================================================================
 
+
 /** 
  * @brief  Detects button presses including repeats with long presses
  * @retval char '\0' if no button press was registered,
- *              'S', '+', '-' if the Set, Inc or Dec button was pressed
- *              or a repeat occurred due to a long press.
+ *              '+' if the increment button is pressed or repeated,
+ *              '-' if the decrement button is pressed or repeated,
+ *              'S' if both buttons are pressed
  */
-char readButton() {    
-    const struct { uint8_t pin; char value; bool repeat; } BTN_INFO[3] = {
-        {PIN_BTN_SET, 'S', false },
-        {PIN_BTN_INC, '+', true },
-        {PIN_BTN_DEC, '-', true }
-    };
-    const uint8_t COUNT = sizeof(BTN_INFO) / sizeof(BTN_INFO[0]);
-    const uint8_t FLAG_DEBOUNCE  = 0x80;
-    const uint8_t FLAG_REPEATED  = 0x40;
-    const uint8_t FLAG_DOWN      = 0x20;
-    const uint8_t BUTTON_MASK    = 0x0F;
+char readButton() {        
+    // Extract previous state and calculate actual state
+    uint8_t curButtons = 0;
+    if (digitalRead(PIN_BTN_DEC) == LOW)
+        curButtons |= 1;
+    if (digitalRead(PIN_BTN_INC) == LOW)
+        curButtons |= 2;
 
-    // No button currently pressed, check if a new press is being detected
-    if (!(_btnState & FLAG_DOWN)) {
-        // Detect a press or return now
-        for(uint8_t i = 0; i < COUNT; i++)
-            if (digitalRead(BTN_INFO[i].pin) == LOW) {
-                _btnState = i | FLAG_DOWN;
-                break;
-            }
-        if (!(_btnState & FLAG_DOWN))
+    // If nothing was pressed and it's still the same,
+    if (!(curButtons || _btnData.buttons))
+        return 0;
+
+    // If a new button is newly pressed, (re)start full sequence
+    if (curButtons > _btnData.buttons) {
+        // Skip if release timeout not expired
+        if (!_btnData.buttons && (long)(millis() -_btnData.timeout) < 0) {
             return 0;
+        }
+        // Set new down state and reset emited flag
+        _btnData.buttons = curButtons;
+        _btnData.emited = false;
+        // ALlow repeat only if one single button is pressed
+        _btnData.allowRepeat = 
+            1 == _btnData.buttons ||
+            2 == _btnData.buttons;
+        // Start debouncing
+        _btnData.debouncing = true;
+        _btnData.timeout = millis() + static_cast<uint32_t>(DEBOUNCE_MS);
 
-        Serial.println(F("BUTTON: Press detected"));
-
-        // Start debounce
-        _btnTimeout = millis() + DEBOUNCE_MS;
-        _btnState |= FLAG_DEBOUNCE;
+        // Done for now
+        return 0;
     }
-    uint8_t idx = _btnState & BUTTON_MASK;
-
-    // If debouncing, wait for the debounce timeout
-    if (_btnState & FLAG_DEBOUNCE) {
-        // Debounce still pending ?
-        if ((long)(millis() -_btnTimeout) < 0)
+    
+    // Wait for debounce to complete
+    if (_btnData.debouncing) {
+        // If debounce complete, set repeat timeout or emit if no repeat
+        if ((long)(millis() -_btnData.timeout) >= 0) {
+            _btnData.debouncing = false;
+            _btnData.timeout += 
+                static_cast<uint32_t>(REPEAT_FIRST_MS - DEBOUNCE_MS);            
+        }
+        else
             return 0;
-        
-        // Debounce complete !
-        _btnState &= ~FLAG_DEBOUNCE;
-        if (BTN_INFO[idx].repeat) {
-            // Repeating: Set first repeat timeout & remove debounce flag
-            Serial.println(F("BUTTON: Debounce complete"));
-            _btnTimeout += (uint32_t)(REPEAT_FIRST_MS - DEBOUNCE_MS);
-        }
-        else {
-            // Not repeating, send press result now
-            return BTN_INFO[idx].value;
-        }
     }
 
-    // If released, reset state and return released button if repeating and not yet repeated
-    if (digitalRead(BTN_INFO[idx].pin) == HIGH) {
-        Serial.println(F("BUTTON: Released"));
-        bool returnValue = BTN_INFO[idx].repeat && !(_btnState & FLAG_REPEATED);
-        _btnState = 0;
-        return returnValue ? BTN_INFO[idx].value : 0;
+    // If some but not all buttons were released, we stall (invalid state)
+    if (curButtons && curButtons < _btnData.buttons)
+        return 0;
+    
+    // If fully released or repeated, then we emit a button code
+    uint8_t emitButtons = 0;
+    // All buttons were released, reset and emit if not yet done so
+    if (curButtons == 0) {
+        if (!_btnData.emited)
+            emitButtons = _btnData.buttons;
+        // Clear and set debounce on release        
+        _btnData.buttons = 0;
+        _btnData.timeout = millis() + static_cast<uint32_t>(DEBOUNCE_MS);
     }
-
-    // Handle repeats
-    if (BTN_INFO[idx].repeat && (long)(millis() -_btnTimeout) >= 0) {
-        Serial.println(F("BUTTON: Repeat detected"));
-        _btnState |= FLAG_REPEATED;
-        _btnTimeout += (uint32_t)REPEAT_NEXT_MS;
-        return BTN_INFO[idx].value;
+    // Non repeat button is pressed and not yet emited, emit
+    else if (!_btnData.allowRepeat) {
+        if (!_btnData.emited)
+            emitButtons = _btnData.buttons;
     }
-
-    // Fallback
-    return 0;
+    // Track for repeats
+    else if ((long)(millis() - _btnData.timeout) >= 0) {
+        emitButtons = _btnData.buttons;
+        _btnData.timeout += static_cast<uint32_t>(REPEAT_NEXT_MS);
+    }
+    
+    // Now emit
+    if (emitButtons)
+        _btnData.emited = true;
+    switch(emitButtons) {
+        case 1:
+            return '-';
+        case 2:
+            return '+';
+        case 3:
+            return 'S';
+        default:
+            return '\0';
+    }
 }
 
 /** 
  * @brief  Reads the current time
  * @retval The current time of day.
  */
-timeofday_t readTime() {
+TimeData readTime() {
     DateTime now = _rtc.now();
 
-    timeofday_t result;
+    TimeData result;
     result.h = now.hour();
     result.m = now.minute();
     result.s = now.second();
@@ -315,7 +338,7 @@ uint8_t stateShowTime(bool init) {
         Serial.println("Entering state 'ShowTime'");
     #endif
 
-    timeofday_t time = readTime();
+    TimeData time = readTime();
     
     // Only push time if it is not the correctly displayed one
     if (init || _curTime.h != time.h) {
@@ -647,7 +670,6 @@ void setup() {
     pinMode(PIN_PWM_SEC, OUTPUT);
 
     // Initiaize the button pins
-    pinMode(PIN_BTN_SET, INPUT_PULLUP);
     pinMode(PIN_BTN_DEC, INPUT_PULLUP);
     pinMode(PIN_BTN_INC, INPUT_PULLUP);
 
@@ -659,10 +681,14 @@ void setup() {
     _lastState = STATE_NONE;
     _curState = STATE_SHOW_TIME;
 
-    // If "S" button is pressed at startup, then we enter calibration mode
-    if (digitalRead(PIN_BTN_SET) == LOW) {
-        while(readButton() != 'S');
-        _curState = STATE_CALIBRATE_START;    
+    // Wait 5 times the debounce timeout for the "set" key to see if we
+    // must enter calibration mode...
+    uint32_t timeout = millis() + static_cast<uint32_t>(DEBOUNCE_MS * 5);
+    while((long)(millis() - timeout) < 0) {
+        if (readButton() == 'S') {
+            _curState = STATE_CALIBRATE_START;    
+            break;
+        }
     }
 }
 
@@ -713,5 +739,4 @@ void loop() {
 
     if (_curState == STATE_NONE)
         _curState = _lastState;
-
 }
